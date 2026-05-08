@@ -1,0 +1,91 @@
+# =============================================================
+#  PostgREST SaaS Lab  --  PostgreSQL 13 + PostgREST v12
+#  Schema-per-tenant isolation · JWT auth · RLS
+# =============================================================
+
+name: postgrest-lab
+
+services:
+
+  # ── PostgreSQL 13 ──────────────────────────────────────────
+  postgres:
+    image: postgres:13
+    container_name: lab_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-saas_lab}
+      POSTGRES_USER:     ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres123}
+    volumes:
+      - ./init:/docker-entrypoint-initdb.d   # scripts run in alphabetical order
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - lab_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-saas_lab}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Demo Dashboard ────────────────────────────────────────
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lab_dashboard
+    restart: unless-stopped
+    volumes:
+      - .:/lab                                  # repo root mounted at /lab
+      - /var/run/docker.sock:/var/run/docker.sock  # allows running make test-* from inside
+    environment:
+      BASE_URL:              "http://postgrest:3000"
+      DEMO_DASHBOARD_HOST:   "0.0.0.0"
+      JWT_SECRET:            "${JWT_SECRET:-lab-super-secret-jwt-key-32chars!!}"
+      COMPOSE_PROJECT_NAME:  "postgrest-lab"
+    ports:
+      - "127.0.0.1:8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lab_net
+
+  # ── PostgREST v12 ──────────────────────────────────────────
+  postgrest:
+    image: postgrest/postgrest:v12.2.8
+    container_name: lab_postgrest
+    restart: unless-stopped
+    environment:
+      # Connection: uses the authenticator role (NOINHERIT)
+      PGRST_DB_URI:        postgres://authenticator:auth_pass_123@postgres:5432/saas_lab
+      # Exposed schemas -- one per tenant
+      PGRST_DB_SCHEMAS:    "tenant_a,tenant_b"
+      # Anonymous role (requests without a JWT)
+      PGRST_DB_ANON_ROLE:  anon
+      # JWT secret (minimum 32 chars) -- must match JWT_SECRET in .env
+      PGRST_JWT_SECRET:    "${JWT_SECRET:-lab-super-secret-jwt-key-32chars!!}"
+      PGRST_DB_POOL:        10
+      PGRST_DB_MAX_ROWS:    "1000"
+      PGRST_LOG_LEVEL:      info
+      # Server-Timing header — useful for query profiling in the lab; disable in production
+      PGRST_SERVER_TIMING_ENABLED: "true"
+      # Needed when init/07_functions.sql (RPC endpoints) is implemented
+      PGRST_DB_EXTRA_SEARCH_PATH: "public"
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - lab_net
+
+# ── Isolated bridge network ────────────────────────────────────
+networks:
+  lab_net:
+    driver: bridge
+
+# ── Persistent volume ──────────────────────────────────────────
+volumes:
+  postgres_data:
